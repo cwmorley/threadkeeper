@@ -1,0 +1,13 @@
+{
+  "name": "threadkeeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-first narrative state and continuity review prototype for long-form fiction.",
+  "scripts": {
+    "test": "node --test",
+    "ingest": "node src/threadkeeper.mjs ingest",
+    "review": "node src/threadkeeper.mjs review",
+    "consequence": "node src/threadkeeper.mjs consequence"
+  }
+}

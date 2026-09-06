@@ -1,0 +1,372 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+
+const STOP_ENTITIES = new Set([
+  'The', 'This', 'That', 'These', 'Those', 'There', 'Then', 'When', 'Where',
+  'What', 'Which', 'After', 'Before', 'Chapter', 'Period', 'Narrative',
+  'First', 'Second', 'Third', 'Part', 'Book', 'Miss', 'Mr', 'Mrs', 'Dr'
+]);
+
+function isStructuralPhrase(value) {
+  const first = value.split(' ')[0];
+  return STOP_ENTITIES.has(value)
+    || ((first === 'Chapter' || first === 'Part' || first === 'Period' || first === 'Book')
+      && /^(?:I|V|X|L|C|D|M|[0-9]+|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)$/i.test(value.split(' ')[1] || ''));
+}
+
+function die(message) {
+  console.error(`Threadkeeper: ${message}`);
+  process.exitCode = 1;
+}
+
+function parseArgs(argv) {
+  const [command, ...rest] = argv;
+  const args = { command, positional: [] };
+  for (let i = 0; i < rest.length; i += 1) {
+    const token = rest[i];
+    if (token.startsWith('--')) {
+      const key = token.slice(2);
+      const next = rest[i + 1];
+      if (next && !next.startsWith('--')) {
+        args[key] = next;
+        i += 1;
+      } else {
+        args[key] = true;
+      }
+    } else {
+      args.positional.push(token);
+    }
+  }
+  return args;
+}
+
+function slugify(value) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'scenario';
+}
+
+async function readText(filePath) {
+  return fs.readFile(filePath, 'utf8');
+}
+
+function cleanText(text) {
+  return text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function normalizeHeading(line) {
+  return line.replace(/^#+\s*/, '').replace(/\s+/g, ' ').trim();
+}
+
+function isChapterHeading(line) {
+  const normalized = normalizeHeading(line);
+  return /^(?:chapter|part|period|book)\b/i.test(normalized)
+    || /^the\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:period|part)\b/i.test(normalized)
+    || /^(?:prologue|epilogue|introduction|foreword|afterword)\b/i.test(normalized);
+}
+
+function splitScenes(text) {
+  const lines = cleanText(text).split('\n');
+  const headings = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (line && isChapterHeading(line)) headings.push({ index, title: normalizeHeading(line) });
+  }
+
+  if (headings.length === 0) {
+    return [{ id: 'scene-001', ordinal: 1, title: 'Imported manuscript', startLine: 1, endLine: lines.length, text: lines.join('\n').trim() }];
+  }
+
+  const scenes = [];
+  for (let i = 0; i < headings.length; i += 1) {
+    const heading = headings[i];
+    const next = headings[i + 1];
+    const start = heading.index;
+    const end = next ? next.index : lines.length;
+    const sceneText = lines.slice(start + 1, end).join('\n').trim();
+    scenes.push({
+      id: `scene-${String(i + 1).padStart(3, '0')}`,
+      ordinal: i + 1,
+      title: heading.title,
+      startLine: start + 1,
+      endLine: end,
+      text: sceneText
+    });
+  }
+
+  const preamble = lines.slice(0, headings[0].index).join('\n').trim();
+  if (preamble) {
+    scenes.unshift({
+      id: 'scene-000', ordinal: 0, title: 'Preamble', startLine: 1,
+      endLine: headings[0].index, text: preamble
+    });
+  }
+  return scenes;
+}
+
+function wordCount(text) {
+  return (text.match(/\b[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*\b/gu) || []).length;
+}
+
+function sentenceCount(text) {
+  return Math.max(0, (text.match(/[.!?](?:["'”’)]*)?(?=\s|$)/g) || []).length);
+}
+
+function extractCandidateEntities(text) {
+  const candidates = new Map();
+  const pattern = /\b[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}\b/g;
+  const sentenceStarters = new Set(['A', 'An', 'After', 'Before', 'During', 'For', 'From', 'In', 'Later', 'One', 'Only', 'Public', 'The', 'This', 'When', 'Years']);
+  for (const line of cleanText(text).split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || isChapterHeading(trimmed)) continue;
+    for (const match of trimmed.matchAll(pattern)) {
+      const value = match[0].trim();
+      if (isStructuralPhrase(value) || value.length < 3) continue;
+      const first = value.split(' ')[0];
+      if (sentenceStarters.has(first) && first !== 'The') continue;
+      const count = candidates.get(value) || 0;
+      candidates.set(value, count + 1);
+    }
+  }
+  return [...candidates.entries()]
+    .map(([name, mentions]) => ({ name, mentions }))
+    .sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name));
+}
+
+function extractMarkers(text) {
+  const markers = [];
+  const patterns = [
+    { type: 'relative-time', regex: /\b(?:yesterday|today|tomorrow|last night|this morning|the next day|three days later|a week later|that evening)\b/gi },
+    { type: 'uncertainty', regex: /\b(?:perhaps|maybe|possibly|seemed|appeared|could have|might have|I think|I suppose)\b/gi },
+    { type: 'open-edit', regex: /(?:\[\s*(?:TODO|TBD|FIXME|CHECK)[^\]]*\]|\?{2,}|TODO|TBD|FIXME)/gi }
+  ];
+  for (const { type, regex } of patterns) {
+    for (const match of text.matchAll(regex)) markers.push({ type, value: match[0], index: match.index });
+  }
+  return markers;
+}
+
+function sceneSummary(scene) {
+  const paragraphs = scene.text.split(/\n\s*\n/).filter(Boolean);
+  const sentences = sentenceCount(scene.text);
+  return {
+    id: scene.id,
+    ordinal: scene.ordinal,
+    title: scene.title,
+    startLine: scene.startLine,
+    endLine: scene.endLine,
+    wordCount: wordCount(scene.text),
+    paragraphCount: paragraphs.length,
+    sentenceCount: sentences,
+    averageSentenceLength: sentences ? Math.round(wordCount(scene.text) / sentences * 10) / 10 : 0,
+    candidateEntities: extractCandidateEntities(scene.text).slice(0, 30),
+    markers: extractMarkers(scene.text)
+  };
+}
+
+function markdownScene(scene) {
+  return `---\ntype: scene\nscene_id: ${scene.id}\nordinal: ${scene.ordinal}\nsource_start_line: ${scene.startLine}\nsource_end_line: ${scene.endLine}\n---\n\n# ${scene.title}\n\n${scene.text}\n`;
+}
+
+function relative(from, to) {
+  return path.relative(from, to).replaceAll('\\', '/');
+}
+
+async function ensureDir(dir) {
+  await fs.mkdir(dir, { recursive: true });
+}
+
+async function writeJson(filePath, value) {
+  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+function importReport(manifest) {
+  const warnings = [];
+  const empty = manifest.scenes.filter((scene) => scene.wordCount < 20);
+  if (empty.length) warnings.push(`- ${empty.length} scene(s) contain fewer than 20 words: ${empty.map((scene) => scene.id).join(', ')}`);
+  const duplicateTitles = manifest.scenes
+    .map((scene) => scene.title.toLowerCase())
+    .filter((title, index, values) => values.indexOf(title) !== index);
+  if (duplicateTitles.length) warnings.push(`- Duplicate scene titles detected: ${[...new Set(duplicateTitles)].join(', ')}`);
+  const openMarkers = manifest.scenes.flatMap((scene) => scene.markers.filter((marker) => marker.type === 'open-edit').map((marker) => `${scene.id}: ${marker.value}`));
+  if (openMarkers.length) warnings.push(`- Explicit open-edit markers found: ${openMarkers.join('; ')}`);
+
+  return `# Import Report\n\n## Summary\n\n- Source: ${manifest.source}\n- Imported scenes: ${manifest.scenes.length}\n- Total words: ${manifest.totalWordCount.toLocaleString()}\n- Candidate entities: ${manifest.entities.length}\n- Generated: ${manifest.generatedAt}\n\n## Warnings\n\n${warnings.length ? warnings.join('\n') : '- No deterministic import warnings.'}\n\n## Important boundary\n\nCandidate entities are extraction hints, not accepted canon. No source prose was rewritten.\n`;
+}
+
+async function ingest(args) {
+  const input = args.positional[0];
+  if (!input) return die('ingest requires an input text or Markdown file.');
+  const output = path.resolve(args.out || 'work/project');
+  const inputPath = path.resolve(input);
+  const text = await readText(inputPath);
+  const scenes = splitScenes(text);
+  const summaries = scenes.map(sceneSummary);
+  const entityMap = new Map();
+  for (const scene of summaries) {
+    for (const entity of scene.candidateEntities) entityMap.set(entity.name, (entityMap.get(entity.name) || 0) + entity.mentions);
+  }
+  const manifest = {
+    schemaVersion: '0.1',
+    project: path.basename(output),
+    source: inputPath,
+    generatedAt: new Date().toISOString(),
+    totalWordCount: summaries.reduce((sum, scene) => sum + scene.wordCount, 0),
+    scenes: summaries,
+    entities: [...entityMap.entries()].map(([name, mentions]) => ({ name, mentions })).sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name))
+  };
+
+  await ensureDir(output);
+  await ensureDir(path.join(output, 'scenes'));
+  await ensureDir(path.join(output, 'reports'));
+  await ensureDir(path.join(output, 'prompts'));
+  await writeJson(path.join(output, 'manifest.json'), manifest);
+  for (const scene of scenes) await fs.writeFile(path.join(output, 'scenes', `${scene.id}.md`), markdownScene(scene), 'utf8');
+  await fs.writeFile(path.join(output, 'reports', 'import-report.md'), importReport(manifest), 'utf8');
+  console.log(`Imported ${manifest.scenes.length} scene(s), ${manifest.totalWordCount.toLocaleString()} words.`);
+  console.log(`Project: ${output}`);
+}
+
+function reviewReport(manifest) {
+  const findings = [];
+  const repeated = manifest.entities.filter((entity) => entity.mentions >= 8).slice(0, 25);
+  if (repeated.length) findings.push({ severity: 'info', type: 'entity-coverage', message: `Frequently mentioned candidate entities: ${repeated.map((entry) => `${entry.name} (${entry.mentions})`).join(', ')}.` });
+  const timeScenes = manifest.scenes.filter((scene) => scene.markers.some((marker) => marker.type === 'relative-time'));
+  if (timeScenes.length >= 2) findings.push({ severity: 'review', type: 'timeline', message: `Relative-time language appears in ${timeScenes.length} scenes. A temporal review is warranted; the prototype does not yet infer exact dates.` });
+  const uncertaintyScenes = manifest.scenes.filter((scene) => scene.markers.some((marker) => marker.type === 'uncertainty'));
+  if (uncertaintyScenes.length) findings.push({ severity: 'review', type: 'epistemic-language', message: `Uncertainty markers appear in ${uncertaintyScenes.length} scenes. These may indicate unreliable narration, deliberate ambiguity, or facts that need confirmation.` });
+  const shortScenes = manifest.scenes.filter((scene) => scene.wordCount < 100);
+  if (shortScenes.length) findings.push({ severity: 'info', type: 'scene-size', message: `${shortScenes.length} scene(s) are under 100 words. Confirm whether these are intentional fragments, headings, or import boundaries.` });
+
+  return `# Deterministic Review\n\nGenerated: ${new Date().toISOString()}\n\nThis report is a first-pass diagnostic. It does not claim that a flagged pattern is a story flaw.\n\n## Findings\n\n${findings.length ? findings.map((finding, index) => `### ${index + 1}. ${finding.type} (${finding.severity})\n\n${finding.message}`).join('\n\n') : 'No deterministic findings.'}\n\n## Candidate entities\n\n${manifest.entities.slice(0, 50).map((entity) => `- ${entity.name} — ${entity.mentions} mention(s)`).join('\n')}\n`;
+}
+
+async function loadManifest(project) {
+  return JSON.parse(await readText(path.join(project, 'manifest.json')));
+}
+
+async function review(args) {
+  const project = path.resolve(args.positional[0] || 'work/project');
+  const manifest = await loadManifest(project);
+  await fs.writeFile(path.join(project, 'reports', 'review.md'), reviewReport(manifest), 'utf8');
+  console.log(`Wrote ${path.join(project, 'reports', 'review.md')}`);
+}
+
+function buildConsequencePrompt(manifest, scene, previousScenes) {
+  const entityList = manifest.entities.slice(0, 100).map((entity) => `${entity.name} (${entity.mentions} mentions)`).join(', ');
+  const previous = previousScenes.map((item) => `## ${item.title}\n\n${item.text}`).join('\n\n');
+  return `# Threadkeeper Consequence Pass\n\nYou are a feedback-first narrative-state partner. Do not rewrite the manuscript. Analyze the target scene against the preceding material and return an evidence-linked state update.\n\n## Required output\n\n1. Events that occurred\n2. Facts established or changed\n3. Character-state changes\n4. Relationship changes\n5. What each important character now knows, believes, or misunderstands\n6. Plot threads advanced or stalled\n7. New setups and open loops\n8. Possible continuity conflicts with earlier material\n9. Voice, POV, pacing, or causality observations\n10. Three concrete suggestions for the next scene\n\nFor every possible conflict, quote or reference the relevant scene title and explain whether it could be intentional. Use confidence labels: high, medium, or low. Separate confirmed observations from interpretations. Do not promote anything to canon automatically.\n\n## Candidate entities\n\n${entityList || '(none extracted)'}\n\n## Earlier material\n\n${previous || '(no earlier scenes supplied)'}\n\n## Target scene\n\n## ${scene.title}\n\n${scene.text}\n`;
+}
+
+async function callAI(prompt) {
+  const apiKey = process.env.THREADKEEPER_API_KEY;
+  const baseUrl = (process.env.THREADKEEPER_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+  const model = process.env.THREADKEEPER_MODEL;
+  if (!apiKey || !model) return null;
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, temperature: 0.2, messages: [{ role: 'user', content: prompt }] })
+  });
+  if (!response.ok) throw new Error(`AI endpoint returned ${response.status}: ${await response.text()}`);
+  const payload = await response.json();
+  return payload.choices?.[0]?.message?.content || '(No AI content returned.)';
+}
+
+async function consequence(args) {
+  const project = path.resolve(args.positional[0] || 'work/project');
+  const manifest = await loadManifest(project);
+  const sceneNumber = Number(args.scene || 1);
+  const scene = manifest.scenes.find((item) => item.ordinal === sceneNumber) || manifest.scenes[sceneNumber - 1];
+  if (!scene) return die(`scene ${sceneNumber} was not found.`);
+  const allScenes = await Promise.all(manifest.scenes.filter((item) => item.ordinal < scene.ordinal).slice(-3).map(async (item) => ({ ...item, text: await readText(path.join(project, 'scenes', `${item.id}.md`)) })));
+  const targetText = await readText(path.join(project, 'scenes', `${scene.id}.md`));
+  const prompt = buildConsequencePrompt(manifest, { ...scene, text: targetText }, allScenes);
+  const promptPath = path.join(project, 'prompts', `consequence-${scene.id}.md`);
+  await fs.writeFile(promptPath, prompt, 'utf8');
+  console.log(`Wrote ${promptPath}`);
+  if (args['call-ai']) {
+    try {
+      const result = await callAI(prompt);
+      if (result) {
+        const reportPath = path.join(project, 'reports', `consequence-${scene.id}.md`);
+        await fs.writeFile(reportPath, `# Consequence Pass — ${scene.title}\n\n${result}\n`, 'utf8');
+        console.log(`Wrote ${reportPath}`);
+      } else {
+        console.log('AI variables are not configured; prompt packet is ready for manual review.');
+      }
+    } catch (error) {
+      return die(error.message);
+    }
+  }
+}
+
+function scenarioImpact(manifest, change) {
+  const lowerChange = change.toLowerCase();
+  const matchedEntities = manifest.entities.filter((entity) => lowerChange.includes(entity.name.toLowerCase()));
+  const matchedNames = new Set(matchedEntities.map((entity) => entity.name.toLowerCase()));
+  const affectedScenes = manifest.scenes.filter((scene) => {
+    const sceneEntities = scene.candidateEntities.map((entity) => entity.name.toLowerCase());
+    return sceneEntities.some((entity) => [...matchedNames].some((matched) => entity.includes(matched) || matched.includes(entity)));
+  });
+  const keywords = ['plot', 'subplot', 'character', 'relationship', 'timeline', 'reveal', 'ending', 'motive', 'secret', 'mystery', 'rule', 'setting', 'narrator', 'perspective', 'death', 'survive', 'romance', 'antagonist', 'protagonist', 'conceal', 'suspect', 'theft', 'knowledge', 'uncertainty'];
+  const changeDomains = keywords.filter((keyword) => lowerChange.includes(keyword));
+  const relativeTimeScenes = manifest.scenes.filter((scene) => scene.markers.some((marker) => marker.type === 'relative-time'));
+  return { matchedEntities, affectedScenes, changeDomains, relativeTimeScenes };
+}
+
+function scenarioReport(manifest, change, impact, scenarioId) {
+  const entityLines = impact.matchedEntities.length
+    ? impact.matchedEntities.map((entity) => `- ${entity.name} — ${entity.mentions} candidate mention(s)`).join('\n')
+    : '- No existing entity names were matched. Treat this as a new or underspecified canon change.';
+  const sceneLines = impact.affectedScenes.length
+    ? impact.affectedScenes.map((scene) => `- [[${scene.id}]] — ${scene.title} — ${scene.wordCount.toLocaleString()} words`).join('\n')
+    : '- No scenes were matched by extracted entity mentions.';
+  const domainLines = impact.changeDomains.length ? impact.changeDomains.map((domain) => `- ${domain}`).join('\n') : '- No domain keywords were detected; AI or writer clarification is required.';
+  return `# Revision Scenario — ${scenarioId}\n\n## Proposed change\n\n${change}\n\n## What the prototype matched\n\n### Entities\n\n${entityLines}\n\n### Candidate affected scenes\n\n${sceneLines}\n\n### Detected change domains\n\n${domainLines}\n\n## Impact categories to review\n\n### Required changes\n\n- Confirm whether the proposed change alters accepted canon or is only an alternate draft direction.\n- Recheck every matched scene for character motivation, knowledge state, and event causality.\n- Recheck all scenes after the first reveal or turning point related to the change.\n- Re-run timeline and setup/payoff validation after any accepted edit.\n\n### Likely changes\n\n- Character arcs and relationship progression.\n- Reader knowledge and reveal timing.\n- Plot-thread status and unresolved loops.\n- Voice, POV, and emotional interpretation of earlier scenes.\n\n### Possible opportunities\n\n- Earlier passages may become foreshadowing rather than exposition.\n- Apparent contradictions may become deliberate deception or misdirection.\n- Dormant subplots may gain a new causal role.\n- Existing scenes may become more economical if duplicated explanation is removed.\n\n## Revision order\n\n1. Decide the intended canon and reveal timing.\n2. Resolve character knowledge and belief changes.\n3. Resolve timeline and causal dependencies.\n4. Update plot threads, setups, and payoffs.\n5. Revise affected scenes in reading order.\n6. Run a new Consequence Pass on each accepted scene.\n7. Run final continuity, voice, and reader-knowledge reviews.\n\n## Current limitations\n\nThis is an impact scaffold, not a semantic proof. It does not yet infer plot causality, distinguish intentional contradiction from error, or know whether a character's knowledge changed. Those are the next narrative-state features to implement.\n\nNo source prose or canon was changed.\n`;
+}
+
+function scenarioPrompt(manifest, change, impact, targetText) {
+  const entityList = impact.matchedEntities.map((entity) => entity.name).join(', ') || '(none matched)';
+  const sceneList = impact.affectedScenes.map((scene) => `${scene.id}: ${scene.title}`).join('\n') || '(none matched)';
+  return `# Threadkeeper Revision Scenario\n\nYou are analyzing a proposed change to an existing novel. Do not rewrite anything yet. Treat the current manuscript as evidence, not as unquestionable canon. Distinguish accepted fact, draft implication, writer intent, and speculation.\n\n## Proposed change\n\n${change}\n\n## Matched entities\n\n${entityList}\n\n## Candidate affected scenes\n\n${sceneList}\n\n## Required analysis\n\n1. State the direct blast radius.\n2. Identify hard contradictions with evidence and scene references.\n3. Identify soft contradictions or changes in interpretation.\n4. Identify character-knowledge changes.\n5. Identify timeline and causal changes.\n6. Identify setup/payoff changes.\n7. Identify scenes that become stronger opportunities under this revision.\n8. Identify scenes that should remain untouched.\n9. Produce an ordered revision plan.\n10. List the fewest clarifying decisions the writer must make before edits begin.\n\nUse confidence labels: high, medium, low. Flag intentional ambiguity as a possibility. No automatic canon updates.\n\n## Current project context\n\nCandidate entities in project: ${manifest.entities.slice(0, 80).map((entity) => `${entity.name} (${entity.mentions})`).join(', ')}\n\n${targetText}\n`;
+}
+
+async function scenario(args) {
+  const project = path.resolve(args.positional[0] || 'work/project');
+  const change = args.change;
+  if (!change || typeof change !== 'string') return die('scenario requires --change "describe the proposed creative change".');
+  const manifest = await loadManifest(project);
+  const impact = scenarioImpact(manifest, change);
+  const scenarioId = slugify(change);
+  await ensureDir(path.join(project, 'reports'));
+  await ensureDir(path.join(project, 'prompts'));
+  await fs.writeFile(path.join(project, 'reports', `scenario-${scenarioId}.md`), scenarioReport(manifest, change, impact, scenarioId), 'utf8');
+  const targetText = (await Promise.all(impact.affectedScenes.slice(0, 12).map(async (scene) => {
+    const scenePath = path.join(project, 'scenes', `${scene.id}.md`);
+    try { return await readText(scenePath); } catch { return ''; }
+  }))).filter(Boolean).join('\n\n');
+  const prompt = scenarioPrompt(manifest, change, impact, targetText || 'No scene text supplied by the deterministic layer yet.');
+  await fs.writeFile(path.join(project, 'prompts', `scenario-${scenarioId}.md`), prompt, 'utf8');
+  console.log(`Matched ${impact.matchedEntities.length} entity candidate(s) and ${impact.affectedScenes.length} scene(s).`);
+  console.log(`Wrote ${path.join(project, 'reports', `scenario-${scenarioId}.md`)}`);
+  console.log(`Wrote ${path.join(project, 'prompts', `scenario-${scenarioId}.md`)}`);
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+  try {
+    if (args.command === 'ingest') return await ingest(args);
+    if (args.command === 'review') return await review(args);
+    if (args.command === 'consequence') return await consequence(args);
+    if (args.command === 'scenario') return await scenario(args);
+    console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence> ...');
+  } catch (error) {
+    die(error.stack || error.message);
+  }
+}
+
+await main();
