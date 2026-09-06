@@ -371,6 +371,52 @@ async function review(args) {
   console.log(`Wrote ${path.join(project, 'reports', 'review.md')}`);
 }
 
+function buildSummaryPrompt(manifest, reviewText, scenarioText = '') {
+  const sceneInventory = manifest.scenes.map((scene) => {
+    const markerTypes = [...new Set(scene.markers.map((marker) => marker.type))];
+    return `- ${scene.id} — ${scene.title} — ${scene.wordCount} words${markerTypes.length ? ` — markers: ${markerTypes.join(', ')}` : ''}`;
+  }).join('\n');
+  const entityList = manifest.entities.slice(0, 80)
+    .map((entity) => `${entity.name} (${entity.mentions}${entity.aliases?.length ? `; aliases: ${entity.aliases.join(', ')}` : ''})`)
+    .join(', ');
+
+  return `# Threadkeeper AI Editorial Summary\n\nYou are an evidence-first developmental editor reviewing a narrative-state diagnostic. Produce a concise but useful summary for the novelist. Do not rewrite the manuscript, invent facts, or promote an extraction hint to canon. Distinguish confirmed observations, interpretation, possible intentional ambiguity, and unresolved uncertainty. Reference scene IDs and titles whenever making a specific claim.\n\n## Required output\n\n1. Executive summary in plain English.\n2. What appears structurally healthy.\n3. Highest-priority continuity or narrative risks, ranked by consequence.\n4. Timeline and relative-time watchlist.\n5. Character, entity, and knowledge-state watchlist.\n6. Potential deliberate ambiguity versus likely extraction noise or possible flaw.\n7. Revision-scenario implications, if supplied.\n8. Three to seven concrete next actions for the writer.\n9. A short list of decisions that require author judgment rather than AI inference.\n\nFor each flagged risk, include: evidence, confidence (high/medium/low), why it matters, and the smallest useful next check. Do not call something a contradiction merely because the deterministic layer found a repeated word, uncertainty marker, or differing description.\n\n## Project\n\n- Name: ${manifest.project}\n- Source: ${manifest.source}\n- Source type: ${manifest.preprocessing?.sourceType || 'unknown'}\n- Imported scenes: ${manifest.scenes.length}\n- Total words: ${manifest.totalWordCount.toLocaleString()}\n- Preprocessing: ${manifest.preprocessing?.removedWrapper ? 'source wrapper removed' : 'no wrapper removal'}; ${manifest.preprocessing?.removedTrailingApparatus ? 'trailing apparatus removed' : 'no trailing apparatus removal'}\n\n## Scene inventory\n\n${sceneInventory}\n\n## Candidate entities\n\n${entityList || '(none extracted)'}\n\n## Deterministic review\n\n${reviewText}\n\n## Optional revision scenario\n\n${scenarioText || '(none supplied)'}\n`;
+}
+
+async function summarize(args) {
+  const project = path.resolve(args.positional[0] || 'work/project');
+  const manifest = await loadManifest(project);
+  const reviewPath = path.join(project, 'reports', 'review.md');
+  const reviewText = await fs.readFile(reviewPath, 'utf8').catch(() => reviewReport(manifest));
+  let scenarioText = '';
+  if (args.scenario && typeof args.scenario === 'string') {
+    const scenarioPath = path.resolve(args.scenario);
+    scenarioText = await readText(scenarioPath);
+  }
+
+  const prompt = buildSummaryPrompt(manifest, reviewText, scenarioText);
+  const promptPath = path.join(project, 'prompts', 'summary.md');
+  await ensureDir(path.join(project, 'prompts'));
+  await ensureDir(path.join(project, 'reports'));
+  await fs.writeFile(promptPath, prompt, 'utf8');
+  console.log(`Wrote ${promptPath}`);
+
+  if (args['call-ai']) {
+    try {
+      const result = await callAI(prompt);
+      if (result) {
+        const reportPath = path.join(project, 'reports', 'ai-summary.md');
+        await fs.writeFile(reportPath, `# AI Editorial Summary — ${manifest.project}\n\n${result}\n`, 'utf8');
+        console.log(`Wrote ${reportPath}`);
+      } else {
+        console.log('AI variables are not configured; prompt packet is ready for manual review.');
+      }
+    } catch (error) {
+      return die(error.message);
+    }
+  }
+}
+
 function buildConsequencePrompt(manifest, scene, previousScenes) {
   const entityList = manifest.entities.slice(0, 100).map((entity) => `${entity.name} (${entity.mentions} mentions)`).join(', ');
   const previous = previousScenes.map((item) => `## ${item.title}\n\n${item.text}`).join('\n\n');
@@ -479,8 +525,9 @@ async function main() {
     if (args.command === 'ingest') return await ingest(args);
     if (args.command === 'review') return await review(args);
     if (args.command === 'consequence') return await consequence(args);
+    if (args.command === 'summarize') return await summarize(args);
     if (args.command === 'scenario') return await scenario(args);
-    console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence> ...');
+    console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence|summarize|scenario> ...');
   } catch (error) {
     die(error.stack || error.message);
   }
