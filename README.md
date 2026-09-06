@@ -24,6 +24,7 @@ node src/threadkeeper.mjs ingest corpus\the-moonstone.txt --out work\moonstone
 node src/threadkeeper.mjs review work\moonstone
 node src/threadkeeper.mjs consequence work\moonstone --scene 2
 node src/threadkeeper.mjs summarize work\moonstone
+node src/threadkeeper.mjs deep-summarize work\moonstone --scene 2 --window 2
 node src/threadkeeper.mjs scenario work\moonstone --change "Make the main suspect secretly responsible for the theft while preserving the final reveal."
 ```
 
@@ -36,6 +37,8 @@ Outputs are written under the selected project directory:
 - `prompts\consequence-*.md` — AI-ready context packets and instructions
 - `prompts\summary.md` — AI-ready editorial summary packet
 - `reports\ai-summary.md` — AI-generated editorial summary when `--call-ai` is configured
+- `prompts\deep-summary.md` — bounded scene-evidence packet for deeper AI analysis
+- `reports\deep-ai-summary.md` — deep AI summary when `--call-ai` is configured
 - `reports\scenario-*.md` — revision impact analysis before any rewrite
 - `prompts\scenario-*.md` — AI-ready revision scenario packets
 
@@ -67,6 +70,23 @@ node src/threadkeeper.mjs summarize work\moonstone --scenario work\moonstone\rep
 ```
 
 With the optional endpoint variables configured, add `--call-ai` to write `reports\ai-summary.md`. The summary is advisory and evidence-linked; it cannot update canon or rewrite source prose automatically.
+
+## Deep AI editorial summary
+
+Use `deep-summarize` when the AI needs selected scene prose in addition to the deterministic results. Keep the evidence bounded around a target scene:
+
+```powershell
+node src/threadkeeper.mjs deep-summarize work\moonstone --scene 2 --window 2
+```
+
+You can select explicit scenes or the entire project when the context budget supports it:
+
+```powershell
+node src/threadkeeper.mjs deep-summarize work\moonstone --scenes "1-3,12,20-22" --scenario work\moonstone\reports\scenario-example.md
+node src/threadkeeper.mjs deep-summarize work\moonstone --all-scenes --max-scene-chars 12000 --call-ai
+```
+
+The command includes the deterministic review, selected scene packets, optional revision scenario, and any completed consequence reports. It states the evidence boundary in the prompt so the model must identify what it cannot conclude from a sampled set.
 
 ## Current boundary
 

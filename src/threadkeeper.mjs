@@ -417,6 +417,101 @@ async function summarize(args) {
   }
 }
 
+function parseSceneSelection(value, manifest) {
+  if (!value || typeof value !== 'string') return [];
+  const selected = new Set();
+  for (const token of value.split(',')) {
+    const trimmed = token.trim();
+    if (!trimmed) continue;
+    const range = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const start = Math.min(Number(range[1]), Number(range[2]));
+      const end = Math.max(Number(range[1]), Number(range[2]));
+      for (let ordinal = start; ordinal <= end; ordinal += 1) selected.add(ordinal);
+    } else if (/^\d+$/.test(trimmed)) {
+      selected.add(Number(trimmed));
+    }
+  }
+  return manifest.scenes.filter((scene) => selected.has(scene.ordinal));
+}
+
+function selectDeepScenes(manifest, args) {
+  if (args['all-scenes']) return manifest.scenes;
+  const explicit = parseSceneSelection(args.scenes, manifest);
+  if (explicit.length) return explicit;
+
+  const target = Number(args.scene);
+  if (Number.isFinite(target) && target > 0) {
+    const windowSize = Math.max(0, Number(args.window || 2));
+    return manifest.scenes.filter((scene) => Math.abs(scene.ordinal - target) <= windowSize);
+  }
+
+  const ordinals = new Set([1, 2, 3, Math.ceil(manifest.scenes.length / 2), manifest.scenes.length - 1, manifest.scenes.length]);
+  return manifest.scenes.filter((scene) => ordinals.has(scene.ordinal));
+}
+
+function truncateEvidence(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.65);
+  const tail = maxChars - head;
+  return `${text.slice(0, head)}\n\n[... evidence truncated for context budget ...]\n\n${text.slice(-tail)}`;
+}
+
+function buildDeepSummaryPrompt(manifest, reviewText, scenarioText, scenePackets, consequenceReports) {
+  const sceneEvidence = scenePackets.map(({ scene, text }) => `## ${scene.id} — ${scene.title}\n\n${text}`).join('\n\n');
+  const consequences = consequenceReports.length
+    ? consequenceReports.map(({ name, text }) => `### ${name}\n\n${text}`).join('\n\n')
+    : '(No completed AI consequence reports were found; use the scene evidence and deterministic state only.)';
+  return `# Threadkeeper Deep AI Editorial Summary\n\nYou are a senior developmental editor and narrative-continuity analyst. Analyze the supplied narrative-state evidence and selected scene packets. This is an evidence-linked review, not a rewrite. Do not invent events, character knowledge, chronology, motives, or authorial intent. Treat candidate entities and deterministic markers as fallible signals. Distinguish confirmed observation, strong inference, plausible interpretation, and unknown.\n\nThe evidence is bounded. If only selected scenes are supplied, explicitly say what cannot be concluded about unprovided scenes. Do not pretend a sampled review is a complete audit.\n\n## Required output\n\n1. A concise synopsis of the story movement represented by the evidence.\n2. The strongest continuity and causality observations, with scene references.\n3. A ranked watchlist of possible contradictions, unresolved dependencies, or suspicious discontinuities. For each: evidence, confidence, why it matters, and the smallest confirming check.\n4. Character-state and reader-knowledge transitions: who learns, believes, hides, misunderstands, or appears to misunderstand what.\n5. Timeline and relative-time analysis, including competing interpretations rather than false precision.\n6. Clue, setup, payoff, red-herring, and reveal dependencies visible in the evidence.\n7. Tone, POV, voice, and pacing observations limited to the supplied prose.\n8. Implications of the proposed revision scenario, including what should remain untouched.\n9. Three to seven prioritized next actions for the writer.\n10. A short “do not overreact” section identifying flags that are probably extraction noise or deliberate ambiguity.\n\nUse scene IDs and titles for claims. Quote only short fragments when necessary. Never rewrite source prose or update canon automatically.\n\n## Project state\n\n- Project: ${manifest.project}\n- Source: ${manifest.source}\n- Imported scenes: ${manifest.scenes.length}\n- Total words: ${manifest.totalWordCount.toLocaleString()}\n- Source type: ${manifest.preprocessing?.sourceType || 'unknown'}\n- Preprocessing: ${manifest.preprocessing?.removedWrapper ? 'wrapper removed' : 'no wrapper removal'}; ${manifest.preprocessing?.removedTrailingApparatus ? 'trailing apparatus removed' : 'no trailing apparatus removal'}\n- Evidence scenes supplied below: ${scenePackets.length}\n\n## Deterministic review\n\n${reviewText}\n\n## Revision scenario\n\n${scenarioText || '(No revision scenario supplied.)'}\n\n## Selected scene evidence\n\n${sceneEvidence}\n\n## Completed consequence reports\n\n${consequences}\n`;
+}
+
+async function deepSummarize(args) {
+  const project = path.resolve(args.positional[0] || 'work/project');
+  const manifest = await loadManifest(project);
+  const reviewPath = path.join(project, 'reports', 'review.md');
+  const reviewText = await fs.readFile(reviewPath, 'utf8').catch(() => reviewReport(manifest));
+  let scenarioText = '';
+  if (args.scenario && typeof args.scenario === 'string') scenarioText = await readText(path.resolve(args.scenario));
+
+  const selectedScenes = selectDeepScenes(manifest, args);
+  const maxSceneChars = Math.max(2000, Number(args['max-scene-chars'] || 24000));
+  const scenePackets = [];
+  for (const scene of selectedScenes) {
+    const scenePath = path.join(project, 'scenes', `${scene.id}.md`);
+    const text = await readText(scenePath);
+    scenePackets.push({ scene, text: truncateEvidence(text, maxSceneChars) });
+  }
+
+  const consequenceReports = [];
+  const reportFiles = await fs.readdir(path.join(project, 'reports')).catch(() => []);
+  for (const name of reportFiles.filter((file) => /^consequence-.*\.md$/i.test(file))) {
+    consequenceReports.push({ name, text: await readText(path.join(project, 'reports', name)) });
+  }
+
+  const prompt = buildDeepSummaryPrompt(manifest, reviewText, scenarioText, scenePackets, consequenceReports);
+  const promptPath = path.join(project, 'prompts', 'deep-summary.md');
+  await ensureDir(path.join(project, 'prompts'));
+  await ensureDir(path.join(project, 'reports'));
+  await fs.writeFile(promptPath, prompt, 'utf8');
+  console.log(`Selected ${scenePackets.length} scene(s) for deep summary evidence.`);
+  console.log(`Wrote ${promptPath}`);
+
+  if (args['call-ai']) {
+    try {
+      const result = await callAI(prompt);
+      if (result) {
+        const reportPath = path.join(project, 'reports', 'deep-ai-summary.md');
+        await fs.writeFile(reportPath, `# Deep AI Editorial Summary — ${manifest.project}\n\n${result}\n`, 'utf8');
+        console.log(`Wrote ${reportPath}`);
+      } else {
+        console.log('AI variables are not configured; deep-summary prompt packet is ready for manual review.');
+      }
+    } catch (error) {
+      return die(error.message);
+    }
+  }
+}
+
 function buildConsequencePrompt(manifest, scene, previousScenes) {
   const entityList = manifest.entities.slice(0, 100).map((entity) => `${entity.name} (${entity.mentions} mentions)`).join(', ');
   const previous = previousScenes.map((item) => `## ${item.title}\n\n${item.text}`).join('\n\n');
@@ -526,6 +621,7 @@ async function main() {
     if (args.command === 'review') return await review(args);
     if (args.command === 'consequence') return await consequence(args);
     if (args.command === 'summarize') return await summarize(args);
+    if (args.command === 'deep-summarize') return await deepSummarize(args);
     if (args.command === 'scenario') return await scenario(args);
     console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence|summarize|scenario> ...');
   } catch (error) {
