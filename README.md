@@ -7,6 +7,7 @@ Threadkeeper is a local-first prototype for a narrative-state engine and AI writ
 The prototype currently has no external dependencies. It can:
 
 - ingest a plain-text or Markdown manuscript;
+- remove common Project Gutenberg wrapper/front-matter and trailing transcription apparatus when detected;
 - split a manuscript into chapter/scene documents;
 - create a machine-readable manifest and candidate entity index;
 - produce a deterministic import/review report;
@@ -50,7 +51,7 @@ Without those variables, the command still writes the complete prompt packet for
 
 ## Current boundary
 
-This is a vertical-slice foundation, not a claim that the continuity engine is solved. The next meaningful work is to add accepted/provisional canon, character-knowledge state, temporal claims, and evidence-linked findings backed by real test cases.
+This is a vertical-slice foundation, not a claim that the continuity engine is solved. The current deterministic layer cleans common source wrappers, reduces obvious entity noise, and merges unambiguous surname aliases, but it does not yet infer plot causality, character knowledge, or intentional deception. The next meaningful work is to add accepted/provisional canon, character-knowledge state, temporal claims, and evidence-linked findings backed by real test cases.
 
 ## Revision scenarios
 

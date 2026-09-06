@@ -6,17 +6,34 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-const STOP_ENTITIES = new Set([
-  'The', 'This', 'That', 'These', 'Those', 'There', 'Then', 'When', 'Where',
-  'What', 'Which', 'After', 'Before', 'Chapter', 'Period', 'Narrative',
-  'First', 'Second', 'Third', 'Part', 'Book', 'Miss', 'Mr', 'Mrs', 'Dr'
+const STRUCTURAL_WORDS = new Set(['Chapter', 'Period', 'Narrative', 'Part', 'Book']);
+const ENTITY_NOISE_WORDS = new Set([
+  'A', 'An', 'And', 'After', 'All', 'Another', 'Any', 'Before', 'But', 'Can',
+  'Could', 'Did', 'During', 'Each', 'Even', 'Every', 'First', 'For', 'From',
+  'Her', 'Here', 'His', 'How', 'I', 'If', 'In', 'It', 'Later', 'Many', 'Most',
+  'Must', 'My', 'Never', 'Next', 'No', 'Not', 'Now', 'Of', 'Once', 'Only',
+  'One', 'Our', 'Perhaps', 'Public', 'Quite', 'She', 'Some', 'That', 'The',
+  'Their', 'Then', 'There', 'These', 'They', 'This', 'Those', 'To', 'Very',
+  'Was', 'We', 'Well', 'When', 'Where', 'What', 'Which', 'Who', 'Why', 'Yes', 'You',
+  'Dr', 'Mr', 'Mrs', 'Miss', 'Ms', 'About', 'Are', 'Certainly', 'Does', 'Don',
+  'Good', 'Have', 'Just', 'Let', 'Nothing'
 ]);
+const HONORIFIC_PREFIXES = new Set([
+  'Captain', 'Colonel', 'Doctor', 'Dr', 'Inspector', 'Major', 'Mister', 'Miss',
+  'Mr', 'Mrs', 'Ms', 'Mademoiselle', 'Monsieur', 'Papa', 'Professor', 'Reverend', 'Superintendent'
+]);
+const LEADING_NOISE_WORDS = new Set([
+  ...ENTITY_NOISE_WORDS, 'Again', 'Both', 'Excepting', 'Had', 'Neither', 'Old',
+  'Or', 'Poor', 'So', 'Tell', 'Though', 'To', 'With', 'As', 'At', 'By', 'Into',
+  'Near', 'On', 'Presently', 'Suddenly', 'Take', 'Through', 'Under', 'Upon',
+  'Young', 'Uncle', 'Aunt'
+]);
+const ORDINAL = '(?:[IVXLCDM]+|[0-9]+|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth)';
 
 function isStructuralPhrase(value) {
   const first = value.split(' ')[0];
-  return STOP_ENTITIES.has(value)
-    || ((first === 'Chapter' || first === 'Part' || first === 'Period' || first === 'Book')
-      && /^(?:I|V|X|L|C|D|M|[0-9]+|One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten)$/i.test(value.split(' ')[1] || ''));
+  return STRUCTURAL_WORDS.has(value)
+    || (STRUCTURAL_WORDS.has(first) && new RegExp(`^${ORDINAL}$`, 'i').test(value.split(' ')[1] || ''));
 }
 
 function die(message) {
@@ -57,19 +74,60 @@ function cleanText(text) {
   return text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 }
 
+function prepareSource(text) {
+  const normalized = cleanText(text);
+  const lines = normalized.split('\n');
+  const startMarker = lines.findIndex((line) => /^\s*\*\*\* START OF THE PROJECT GUTENBERG EBOOK\b/i.test(line));
+  const endMarker = lines.findIndex((line, index) => index > startMarker && /^\s*\*\*\* END OF THE PROJECT GUTENBERG EBOOK\b/i.test(line));
+  if (startMarker === -1 && endMarker === -1) {
+    return {
+      text: normalized,
+      lineOffset: 0,
+      sourceType: 'manuscript',
+      removedWrapper: false,
+      removedLinesBeforeNarrative: 0,
+      removedTrailingApparatus: false
+    };
+  }
+
+  let bodyEnd = endMarker === -1 ? lines.length : endMarker;
+  let bodyStart = startMarker === -1 ? 0 : startMarker + 1;
+  const transcriberNotes = lines.findIndex((line, index) => index > bodyStart && /^\s*transcriber[’']s notes\s*:/i.test(line));
+  if (transcriberNotes >= 0 && transcriberNotes < bodyEnd) bodyEnd = transcriberNotes;
+  const lastChapterHeading = lines.reduce((last, line, index) => {
+    return index > bodyStart && new RegExp(`^\\s*chapter\\s+${ORDINAL}(?:\\b|[.:—-])`, 'i').test(line) ? index : last;
+  }, -1);
+  const advertisementDivider = lines.findIndex((line, index) => index > lastChapterHeading && index < bodyEnd && /^\s*={20,}\s*$/.test(line));
+  const removedTrailingApparatus = advertisementDivider >= 0 || transcriberNotes >= 0;
+  if (advertisementDivider >= 0) bodyEnd = advertisementDivider;
+  const firstHeading = lines.slice(bodyStart, bodyEnd).findIndex((line) => line.trim() && isChapterHeading(line.trim()));
+  if (firstHeading >= 0) bodyStart += firstHeading;
+
+  return {
+    text: lines.slice(bodyStart, bodyEnd).join('\n').trim(),
+    lineOffset: bodyStart,
+    sourceType: 'project-gutenberg',
+    removedWrapper: true,
+    removedLinesBeforeNarrative: bodyStart - (startMarker === -1 ? 0 : startMarker + 1),
+    removedTrailingApparatus
+  };
+}
+
 function normalizeHeading(line) {
   return line.replace(/^#+\s*/, '').replace(/\s+/g, ' ').trim();
 }
 
 function isChapterHeading(line) {
   const normalized = normalizeHeading(line);
-  return /^(?:chapter|part|period|book)\b/i.test(normalized)
+  if (new RegExp(String.raw`^(?:chapter|part|period|book)\s+${ORDINAL}\s+\d+\s*$`, 'i').test(normalized)) return false;
+  return new RegExp(String.raw`^(?:chapter|part|period|book)\s+${ORDINAL}(?:\b|[.:—-])`, 'i').test(normalized)
     || /^the\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:period|part)\b/i.test(normalized)
     || /^(?:prologue|epilogue|introduction|foreword|afterword)\b/i.test(normalized);
 }
 
 function splitScenes(text) {
-  const lines = cleanText(text).split('\n');
+  const prepared = prepareSource(text);
+  const lines = prepared.text.split('\n');
   const headings = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim();
@@ -91,17 +149,17 @@ function splitScenes(text) {
       id: `scene-${String(i + 1).padStart(3, '0')}`,
       ordinal: i + 1,
       title: heading.title,
-      startLine: start + 1,
-      endLine: end,
+      startLine: start + 1 + prepared.lineOffset,
+      endLine: end + prepared.lineOffset,
       text: sceneText
     });
   }
 
   const preamble = lines.slice(0, headings[0].index).join('\n').trim();
-  if (preamble) {
+  if (preamble && !prepared.removedWrapper) {
     scenes.unshift({
       id: 'scene-000', ordinal: 0, title: 'Preamble', startLine: 1,
-      endLine: headings[0].index, text: preamble
+      endLine: headings[0].index + prepared.lineOffset, text: preamble
     });
   }
   return scenes;
@@ -115,25 +173,76 @@ function sentenceCount(text) {
   return Math.max(0, (text.match(/[.!?](?:["'”’)]*)?(?=\s|$)/g) || []).length);
 }
 
+function canonicalizeCandidate(value) {
+  const words = value.trim().split(/\s+/);
+  while (words.length > 1 && (HONORIFIC_PREFIXES.has(words[0]) || LEADING_NOISE_WORDS.has(words[0]))) words.shift();
+  return words.join(' ');
+}
+
+function isEntityNoise(value) {
+  const words = value.split(' ');
+  return value.length < 3
+    || isStructuralPhrase(value)
+    || (words.length === 1 && (ENTITY_NOISE_WORDS.has(value) || HONORIFIC_PREFIXES.has(value)));
+}
+
+function mergeEntityCandidates(entries) {
+  const normalized = new Map();
+  for (const entry of entries) {
+    const name = canonicalizeCandidate(entry.name);
+    if (isEntityNoise(name)) continue;
+    const current = normalized.get(name) || { name, mentions: 0 };
+    current.mentions += entry.mentions;
+    normalized.set(name, current);
+  }
+
+  const byName = new Map([...normalized].map(([name, entry]) => [name, entry]));
+  const fullNamesBySurname = new Map();
+  for (const name of normalized.keys()) {
+    const words = name.split(' ');
+    if (words.length > 1) {
+      const surname = words.at(-1);
+      const names = fullNamesBySurname.get(surname) || [];
+      names.push(name);
+      fullNamesBySurname.set(surname, names);
+    }
+  }
+  const used = new Set();
+  const merged = [];
+  for (const entry of [...normalized.values()].sort((a, b) => b.name.split(' ').length - a.name.split(' ').length || b.mentions - a.mentions)) {
+    if (used.has(entry.name)) continue;
+    const words = entry.name.split(' ');
+    const aliases = [];
+    if (words.length > 1) {
+      const surname = words.at(-1);
+      const surnameEntry = byName.get(surname);
+      const fullNames = fullNamesBySurname.get(surname) || [];
+      if (surnameEntry && surnameEntry.name !== entry.name && fullNames.length === 1) {
+        used.add(surnameEntry.name);
+        aliases.push(surnameEntry.name);
+        entry.mentions += surnameEntry.mentions;
+      }
+    }
+    used.add(entry.name);
+    merged.push(aliases.length ? { ...entry, aliases } : { ...entry });
+  }
+  return merged.sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name));
+}
+
 function extractCandidateEntities(text) {
   const candidates = new Map();
   const pattern = /\b[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){0,2}\b/g;
-  const sentenceStarters = new Set(['A', 'An', 'After', 'Before', 'During', 'For', 'From', 'In', 'Later', 'One', 'Only', 'Public', 'The', 'This', 'When', 'Years']);
   for (const line of cleanText(text).split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#') || isChapterHeading(trimmed)) continue;
     for (const match of trimmed.matchAll(pattern)) {
-      const value = match[0].trim();
-      if (isStructuralPhrase(value) || value.length < 3) continue;
-      const first = value.split(' ')[0];
-      if (sentenceStarters.has(first) && first !== 'The') continue;
+      const value = canonicalizeCandidate(match[0].trim());
+      if (isEntityNoise(value)) continue;
       const count = candidates.get(value) || 0;
       candidates.set(value, count + 1);
     }
   }
-  return [...candidates.entries()]
-    .map(([name, mentions]) => ({ name, mentions }))
-    .sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name));
+  return mergeEntityCandidates([...candidates.entries()].map(([name, mentions]) => ({ name, mentions })));
 }
 
 function extractMarkers(text) {
@@ -203,6 +312,7 @@ async function ingest(args) {
   const output = path.resolve(args.out || 'work/project');
   const inputPath = path.resolve(input);
   const text = await readText(inputPath);
+  const preprocessing = prepareSource(text);
   const scenes = splitScenes(text);
   const summaries = scenes.map(sceneSummary);
   const entityMap = new Map();
@@ -214,9 +324,15 @@ async function ingest(args) {
     project: path.basename(output),
     source: inputPath,
     generatedAt: new Date().toISOString(),
+    preprocessing: {
+      sourceType: preprocessing.sourceType,
+      removedWrapper: preprocessing.removedWrapper,
+      removedLinesBeforeNarrative: preprocessing.removedLinesBeforeNarrative,
+      removedTrailingApparatus: preprocessing.removedTrailingApparatus
+    },
     totalWordCount: summaries.reduce((sum, scene) => sum + scene.wordCount, 0),
     scenes: summaries,
-    entities: [...entityMap.entries()].map(([name, mentions]) => ({ name, mentions })).sort((a, b) => b.mentions - a.mentions || a.name.localeCompare(b.name))
+    entities: mergeEntityCandidates([...entityMap.entries()].map(([name, mentions]) => ({ name, mentions })))
   };
 
   await ensureDir(output);
@@ -306,14 +422,15 @@ async function consequence(args) {
 
 function scenarioImpact(manifest, change) {
   const lowerChange = change.toLowerCase();
-  const matchedEntities = manifest.entities.filter((entity) => lowerChange.includes(entity.name.toLowerCase()));
-  const matchedNames = new Set(matchedEntities.map((entity) => entity.name.toLowerCase()));
+  const containsPhrase = (text, phrase) => new RegExp(`(^|[^a-z0-9])${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=$|[^a-z0-9])`, 'i').test(text);
+  const matchedEntities = manifest.entities.filter((entity) => [entity.name, ...(entity.aliases || [])].some((name) => containsPhrase(lowerChange, name.toLowerCase())));
+  const matchedNames = new Set(matchedEntities.flatMap((entity) => [entity.name, ...(entity.aliases || [])]).map((name) => name.toLowerCase()));
   const affectedScenes = manifest.scenes.filter((scene) => {
     const sceneEntities = scene.candidateEntities.map((entity) => entity.name.toLowerCase());
     return sceneEntities.some((entity) => [...matchedNames].some((matched) => entity.includes(matched) || matched.includes(entity)));
   });
   const keywords = ['plot', 'subplot', 'character', 'relationship', 'timeline', 'reveal', 'ending', 'motive', 'secret', 'mystery', 'rule', 'setting', 'narrator', 'perspective', 'death', 'survive', 'romance', 'antagonist', 'protagonist', 'conceal', 'suspect', 'theft', 'knowledge', 'uncertainty'];
-  const changeDomains = keywords.filter((keyword) => lowerChange.includes(keyword));
+  const changeDomains = keywords.filter((keyword) => containsPhrase(lowerChange, keyword));
   const relativeTimeScenes = manifest.scenes.filter((scene) => scene.markers.some((marker) => marker.type === 'relative-time'));
   return { matchedEntities, affectedScenes, changeDomains, relativeTimeScenes };
 }
