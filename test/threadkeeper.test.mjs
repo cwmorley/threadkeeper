@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { splitScenesForTest, extractCandidateEntitiesForTest } from '../src/threadkeeper-test-api.mjs';
+import { reviewModelDraft } from '../src/revision-assessment.mjs';
 
 test('splits chapter headings into ordered scenes', () => {
   const scenes = splitScenesForTest('Prelude\n\nCHAPTER I. Arrival\n\nMara arrived.\n\nCHAPTER II. The Map\n\nElias lied.');
@@ -147,17 +148,73 @@ test('model-authored revision report only replaces diagnostic after grounded res
     server.draft = 'This draft is too short and has no citations.';
     const rejected = await run();
     assert.equal(rejected.code, 1, rejected.stderr);
-    const reportName = fs.readdirSync(path.join(output, 'reports')).find((name) => name.startsWith('revision-'));
-    assert.equal(reportName, undefined);
-    server.draft = ('## Editorial decision\nMara’s innocence conflicts with the final admission in scene-003, source line 6. Scene-001, source line 2 establishes the opening state. Scene-002 contains the telephone setup. Preserve the retrospective reveal, but rebuild its explanation and validate the caller, motive, and opportunity.\n').repeat(6);
+    const reportName = fs.readdirSync(path.join(output, 'reports')).find((name) => name.startsWith('revision-') && name.endsWith('.md'));
+    assert.ok(reportName);
+    assert.match(fs.readFileSync(path.join(output, 'reports', reportName), 'utf8'), /deterministic evidence pass/);
+    server.draft = [
+      '## Editorial decision',
+      'Mara’s innocence conflicts with the final admission in scene-003, source line 6. The present confession must change; the surprise can survive.',
+      'Scene-001, source line 2 establishes her arrival. Scene-002, source line 4 establishes a telephone call, but not the caller’s identity.',
+      '## What should survive',
+      'Keep the observed arrival and the fact of the call. Do not keep the inferred culprit merely because the old ending said so.',
+      '## Consequences',
+      'The downstream obligation is to give the new culprit a feasible opportunity and account for the call. The verification check is whether the early account and revised ending agree.',
+      '## Example edit',
+      'Proposed example edit for the final account: “I heard the shot after I crossed the hall.” This breaks the old confession and requires independent evidence for the time of the shot.',
+      '## Coverage',
+      'This assessment uses selected scenes only, not a whole-book audit.'
+    ].join('\n').repeat(3);
     const accepted = await run();
     assert.equal(accepted.code, 0, accepted.stderr);
-    const name = fs.readdirSync(path.join(output, 'reports')).find((item) => item.startsWith('revision-'));
+    const name = fs.readdirSync(path.join(output, 'reports')).find((item) => item.startsWith('revision-') && item.endsWith('.md'));
     assert.match(fs.readFileSync(path.join(output, 'reports', name), 'utf8'), /AI revision assessment/);
+    const draftPath = path.join(tempDir, 'imported-draft.md');
+    fs.writeFileSync(draftPath, server.draft);
+    const imported = spawnSync(process.execPath, ['src/threadkeeper.mjs', 'assess-revision', output, '--change', change, '--draft', draftPath], { cwd: path.resolve('.'), encoding: 'utf8' });
+    assert.equal(imported.status, 0, imported.stderr);
+    assert.match(fs.readFileSync(path.join(output, 'reports', name), 'utf8'), /Imported revision assessment/);
+    const reviewPath = path.join(output, 'reports', name.replace(/\.md$/, '-model-review.json'));
+    assert.match(JSON.parse(fs.readFileSync(reviewPath, 'utf8')).origin, /imported draft/);
   } finally {
     server.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('editorial gate rejects a source line not included in the model packet', () => {
+  const evidence = [
+    { scene: { id: 'scene-001' }, reasons: ['opening/setup'], passages: [{ text: '1: Mara entered.' }] },
+    { scene: { id: 'scene-002' }, reasons: ['ending/reveal'], passages: [{ text: '4: I killed him.' }] }
+  ];
+  const draft = ('Scene-001, source line 2 claims Mara entered. Scene-002, source line 4 is the confession. ' +
+    'This conflicts with innocence. An example edit changes the confession; a downstream obligation is to verify the timeline. ').repeat(12);
+  const review = reviewModelDraft(draft, evidence, { scene: { id: 'scene-002' } });
+  assert.equal(review.accepted, false);
+  assert.match(review.reasons.join(' '), /outside the evidence actually sent/);
+});
+
+test('editorial gate accepts an explicit cross-scene edit obligation without magic wording', () => {
+  const evidence = [
+    { scene: { id: 'scene-001' }, reasons: ['opening/setup'], passages: [{ text: '2: Mara heard the call.' }] },
+    { scene: { id: 'scene-002' }, reasons: ['ending/reveal'], passages: [{ text: '4: I meant to murder him.' }] }
+  ];
+  const draft = [
+    '## Editorial decision',
+    'The request conflicts with the narrator admission at scene-002, source line 4. Preserve a surprising ending, but change its content.',
+    'The phone call is observed in scene-001, source line 2. That observation does not establish the caller.',
+    'A replacement solution must assign access, means, time, and motive; do not name an unsupported culprit.',
+    '## What survives',
+    'Keep the real call and the uncertainty it creates. Readers can still learn later why the first interpretation failed.',
+    '## Verification',
+    'Check the revised call account against the final explanation, including the message, receiver, and exact time.',
+    '## Short example edit',
+    'At scene-001, source line 2, let Mara say that the caller claimed to know the victim, without naming that person as fact.',
+    'The confession in scene-002, source line 4 must then be rewritten to explain who placed the call and why Mara returned.',
+    '## Coverage',
+    'Only selected excerpts were examined. This is not a full manuscript audit.'
+  ].join('\n') + ' A revised act needs independent evidence and a testable opportunity.'.repeat(18);
+  const review = reviewModelDraft(draft, evidence, { scene: { id: 'scene-002' } });
+  assert.equal(review.accepted, true, review.reasons.join(' '));
 });
 
 test('Roger Ackroyd revision retrieves the setup, correction, and final confession', () => {

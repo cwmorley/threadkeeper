@@ -30,11 +30,10 @@ An adequate analysis must:
 - Give a workable alternative revision brief and at least one example edit with its resulting obligations.
 - Avoid inventing a fully solved replacement mystery when motive, opportunity, and evidence have not been established.
 
-Reference deliverable: [editorial assessment](../examples/roger-ackroyd-editorial-assessment.md). This is a qualitative acceptance case; automated semantic evaluation is not yet implemented.
+Reference deliverable: [editorial assessment](../examples/roger-ackroyd-editorial-assessment.md). A 2026-09-23 `assess-revision --codex` run produced a separate local report that was reviewed against this case and passed the structural citation gate. This is still a qualitative acceptance case; automated semantic evaluation across manuscripts is not implemented.
 
 ## Coverage and provenance
 
 Record the source, source version/hash when available, selected chapters, truncations, and analysis origin. A whole-book claim requires whole-book evidence coverage. Diagnostics alone cannot establish tone consistency, plot causality, or contradiction.
 
 A revision report must distinguish direct contradictions, necessary downstream changes, optional improvements, and uncertain effects. Similar names and keyword overlap are retrieval hints, not proof of a causal relationship.
-

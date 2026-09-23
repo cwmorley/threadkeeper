@@ -11,10 +11,13 @@ Updated: 2026-09-23.
 - A durable [editorial output standard](EDITORIAL-STANDARD.md).
 - Revision evidence retrieval with mandatory opening/ending coverage for identity changes, source SHA-256 freshness checks, original line references, a constrained admission detector, testimony-correction candidates, and an optional model-authored report with minimum citation checks.
 - A production-CLI regression test for the revision case and stale-source refusal. Gutenberg `THE END` trailers are removed on fresh imports.
+- The model gate now checks paired scene/line citations against the exact packet sent, reports specific rejection reasons, and retains a deterministic report when AI fails. This remains a structural floor, not semantic validation.
+- An external editorial draft can be imported with `assess-revision --draft`; it receives the same structural gate and explicit unverified-origin label rather than being silently presented as endpoint output.
+- An optional `--codex` route runs the full evidence packet through an ephemeral, read-only Codex CLI session. A real Roger Ackroyd run with `gpt-6-sol` produced a source-cited editorial assessment that passed the gate and was reviewed against the acceptance standard. It remains a proposal, not accepted canon.
 
 ## Important gaps
 
-- The deterministic revision command detects the ending admission in the Roger Ackroyd case, but has not reproduced the full reference assessment. Model-authored output needs literary-quality evaluation beyond the minimum grounding gate.
+- The deterministic revision command detects the ending admission in the Roger Ackroyd case, but cannot itself reproduce the full reference assessment. The tested Codex route produced a materially useful report for this case; other manuscripts and models still need qualitative review beyond the minimum grounding gate.
 - A local `llama3.1:8b` trial returned a generic draft with no source-line citations and misleading testimony advice. It was rejected rather than shown as a completed assessment. The endpoint workflow is tested with a mock, but the real-model acceptance case remains open.
 - The older `scenario` and `deep-summarize` commands retain their prior retrieval limitations. Use `assess-revision` for a major revision question.
 - Events, character knowledge, and causal dependencies are not yet modeled as validated state.
@@ -26,7 +29,7 @@ Updated: 2026-09-23.
 
 ## Next implementation target
 
-Evaluate at least one full model-authored Roger Ackroyd pass against the reference assessment, then improve retrieval or prompting where it fails. Add semantic checks for connected clue dependencies, narrator identity, and testimony-state transitions. A citation gate is only a floor; it cannot establish that an edit or replacement solution works.
+Test the same workflow on a second, structurally different manuscript and revision request. Add semantic checks for connected clue dependencies, narrator identity, and testimony-state transitions without baking Roger Ackroyd into the engine. A citation gate is only a floor; it cannot establish that an edit or replacement solution works.
 
 ## Publication scope
 
