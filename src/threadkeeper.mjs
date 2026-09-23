@@ -2,7 +2,9 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { assessRevision } from './revision-assessment.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -98,8 +100,10 @@ function prepareSource(text) {
     return index > bodyStart && new RegExp(`^\\s*chapter\\s+${ORDINAL}(?:\\b|[.:—-])`, 'i').test(line) ? index : last;
   }, -1);
   const advertisementDivider = lines.findIndex((line, index) => index > lastChapterHeading && index < bodyEnd && /^\s*={20,}\s*$/.test(line));
-  const removedTrailingApparatus = advertisementDivider >= 0 || transcriberNotes >= 0;
+  const endOfNarrative = lines.findIndex((line, index) => index > lastChapterHeading && index < bodyEnd && /^\s*THE END\s*$/i.test(line));
+  const removedTrailingApparatus = advertisementDivider >= 0 || transcriberNotes >= 0 || (endOfNarrative >= 0 && endOfNarrative + 1 < bodyEnd);
   if (advertisementDivider >= 0) bodyEnd = advertisementDivider;
+  if (endOfNarrative >= 0) bodyEnd = Math.min(bodyEnd, endOfNarrative + 1);
   const firstHeading = lines.slice(bodyStart, bodyEnd).findIndex((line) => line.trim() && isChapterHeading(line.trim()));
   if (firstHeading >= 0) bodyStart += firstHeading;
 
@@ -323,6 +327,7 @@ async function ingest(args) {
     schemaVersion: '0.1',
     project: path.basename(output),
     source: inputPath,
+    sourceSha256: createHash('sha256').update(text).digest('hex'),
     generatedAt: new Date().toISOString(),
     preprocessing: {
       sourceType: preprocessing.sourceType,
@@ -518,17 +523,49 @@ function buildConsequencePrompt(manifest, scene, previousScenes) {
   return `# Threadkeeper Consequence Pass\n\nYou are a feedback-first narrative-state partner. Do not rewrite the manuscript. Analyze the target scene against the preceding material and return an evidence-linked state update.\n\n## Required output\n\n1. Events that occurred\n2. Facts established or changed\n3. Character-state changes\n4. Relationship changes\n5. What each important character now knows, believes, or misunderstands\n6. Plot threads advanced or stalled\n7. New setups and open loops\n8. Possible continuity conflicts with earlier material\n9. Voice, POV, pacing, or causality observations\n10. Three concrete suggestions for the next scene\n\nFor every possible conflict, quote or reference the relevant scene title and explain whether it could be intentional. Use confidence labels: high, medium, or low. Separate confirmed observations from interpretations. Do not promote anything to canon automatically.\n\n## Candidate entities\n\n${entityList || '(none extracted)'}\n\n## Earlier material\n\n${previous || '(no earlier scenes supplied)'}\n\n## Target scene\n\n## ${scene.title}\n\n${scene.text}\n`;
 }
 
-async function callAI(prompt) {
+async function callAI(prompt, options = {}) {
+  const local = options.localModel;
+  if (local) {
+    const response = await fetch('http://localhost:11434/api/chat', {
+      method: 'POST',
+      signal: AbortSignal.timeout(600000),
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: local, stream: true, messages: [{ role: 'user', content: prompt }], options: { num_ctx: 32768, num_predict: 2500, temperature: 0.2 } })
+    });
+    if (!response.ok) throw new Error(`Local AI returned ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    let pending = '';
+    let answer = '';
+    const decoder = new TextDecoder();
+    for await (const chunk of response.body) {
+      pending += decoder.decode(chunk, { stream: true });
+      const records = pending.split('\n');
+      pending = records.pop() || '';
+      for (const record of records) {
+        if (!record.trim()) continue;
+        const payload = JSON.parse(record);
+        if (payload.error) throw new Error(`Local AI error: ${payload.error}`);
+        answer += payload.message?.content || '';
+      }
+    }
+    pending += decoder.decode();
+    if (pending.trim()) {
+      const payload = JSON.parse(pending);
+      if (payload.error) throw new Error(`Local AI error: ${payload.error}`);
+      answer += payload.message?.content || '';
+    }
+    return answer;
+  }
   const apiKey = process.env.THREADKEEPER_API_KEY;
   const baseUrl = (process.env.THREADKEEPER_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
   const model = process.env.THREADKEEPER_MODEL;
   if (!apiKey || !model) return null;
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
+    signal: AbortSignal.timeout(300000),
     headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, temperature: 0.2, messages: [{ role: 'user', content: prompt }] })
   });
-  if (!response.ok) throw new Error(`AI endpoint returned ${response.status}: ${await response.text()}`);
+  if (!response.ok) throw new Error(`AI endpoint returned ${response.status}: ${(await response.text()).slice(0, 500)}`);
   const payload = await response.json();
   return payload.choices?.[0]?.message?.content || '(No AI content returned.)';
 }
@@ -623,7 +660,8 @@ async function main() {
     if (args.command === 'summarize') return await summarize(args);
     if (args.command === 'deep-summarize') return await deepSummarize(args);
     if (args.command === 'scenario') return await scenario(args);
-    console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence|summarize|scenario> ...');
+    if (args.command === 'assess-revision') return await assessRevision(args, { loadManifest, readText, ensureDir, callAI, slugify, die });
+    console.log('Usage: node src/threadkeeper.mjs <ingest|review|consequence|summarize|deep-summarize|scenario|assess-revision> ...');
   } catch (error) {
     die(error.stack || error.message);
   }

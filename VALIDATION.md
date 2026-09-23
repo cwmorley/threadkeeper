@@ -26,3 +26,12 @@ node src/threadkeeper.mjs deep-summarize work/verification-new --scenes "4-5,19-
 ```
 
 The [editorial assessment](examples/roger-ackroyd-editorial-assessment.md) is a separately authored source-based example. Future automated results should be evaluated against the [editorial standard](docs/EDITORIAL-STANDARD.md), not just these command exit codes.
+
+## Revision assessment implementation check — 2026-09-23
+
+- `npm test`: 8 passed, 0 failed. New production-CLI tests cover final admission retrieval, testimony-correction selection, source-change refusal, acceptance/rejection of a mocked model response, and a corpus-backed Roger Ackroyd retrieval check. The older four unit tests still use a duplicated test seam.
+- Fresh Roger Ackroyd import: 27 chapter units, 69,949 counted words. Gutenberg publisher advertising after `THE END` is no longer included in the generated last chapter. This remains a heuristic import count, not a certified narrative-only word count.
+- `assess-revision` on the Sheppard-innocence request: selected 13 of 27 chapters, including IV–V, XIX–XX, XXIV–XXVII; flagged the explicit first-person murder admission in XXVII. The evidence packet contains original source lines 1652 and 1867. The report states that the speaker's identity still requires confirmation before turning that pattern into a canonical claim.
+- Source hash is recorded and checked before assessment. A modified source is refused until re-imported.
+- The deterministic report is a bounded evidence-backed diagnosis and revision brief, not the full reference editorial assessment. Model-generated output must be evaluated separately for connected causality, accurate citations, and workable proposed edits.
+- Local `llama3.1:8b` attempt on a compact 28,936-byte evidence packet: returned a generic draft without source-line citations and with unsafe advice to "correct" testimony. It was rejected and saved as a noncanonical draft under the local project's `prompts/` directory; the writer-facing diagnostic was not replaced. A larger initial nonstreaming attempt failed before returning content. Neither run satisfies the editorial acceptance standard.
