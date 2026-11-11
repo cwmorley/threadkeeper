@@ -27,7 +27,9 @@ This reference assessment was written by Codex after directly reading relevant s
 
 ## Quick start
 
-```powershell
+Requires Node.js 22 or newer. There is nothing to install. Commands below use forward slashes and work in PowerShell, bash, and zsh.
+
+```sh
 cd threadkeeper
 npm test
 node src/threadkeeper.mjs ingest corpus/pg69087.txt --out work/ackroyd-first-run
@@ -38,45 +40,62 @@ node src/threadkeeper.mjs assess-revision work/ackroyd-first-run --change "Make 
 node src/threadkeeper.mjs assess-revision work/ackroyd-first-run --change "Make Dr. Sheppard innocent while preserving the final reveal." --codex
 ```
 
-Run with Node.js 22 or newer. `assess-revision` writes a readable deterministic diagnosis and source-evidence packet. Add `--codex` (with Codex CLI installed and signed in), `--call-ai` (with a configured endpoint), or `--local-model llama3.1:8b` (with Ollama running) to request a prose editorial assessment. The diagnostic is saved first and remains available if the model fails. A model draft must cite paired scene IDs and source lines from the passages it actually received, address the ending and corrected testimony when applicable, and include a downstream obligation and verification check before it can replace the diagnostic. Passing that structural gate does not prove literary accuracy. No model account or API key is required for local diagnostics. Use a fresh output directory when comparing imports.
+The last command needs Codex CLI installed and signed in; the others run with no account or API key. The later examples in this README (`consequence`, `summarize`, and the `deep-summarize` variants) use the short bundled fixture. Create that project first:
+
+```sh
+node src/threadkeeper.mjs ingest corpus/moonstone-smoke.md --out work/moonstone
+```
+
+`assess-revision` writes a readable deterministic diagnosis and source-evidence packet. Add `--codex` (with Codex CLI installed and signed in), `--call-ai` (with a configured endpoint), or `--local-model llama3.1:8b` (with Ollama running) to request a prose editorial assessment. The diagnostic is saved first and remains available if the model fails. A model draft must cite paired scene IDs and source lines from the passages it actually received, address the ending and corrected testimony when applicable, and include a downstream obligation and verification check before it can replace the diagnostic. Passing that structural gate does not prove literary accuracy. No model account or API key is required for local diagnostics. Use a fresh output directory when comparing imports.
 
 Outputs are written under the selected project directory:
 
 - `manifest.json` — imported scenes and candidate entities
-- `scenes\` — one Markdown file per imported scene/chapter
-- `reports\import-report.md` — import diagnostics
-- `reports\review.md` — deterministic review findings
-- `prompts\consequence-*.md` — AI-ready context packets and instructions
-- `prompts\summary.md` — AI-ready editorial summary packet
-- `reports\ai-summary.md` — AI-generated editorial summary when `--call-ai` is configured
-- `prompts\deep-summary.md` — bounded scene-evidence packet for deeper AI analysis
-- `reports\deep-ai-summary.md` — deep AI summary when `--call-ai` is configured
-- `reports\scenario-*.md` — revision impact analysis before any rewrite
-- `prompts\scenario-*.md` — AI-ready revision scenario packets
-- `reports\revision-*.md` — revision diagnosis or validated-minimum AI proposal, with source provenance
-- `prompts\revision-*.md` — line-numbered evidence and editorial instructions
-- `reports\revision-*-model-review.json` — machine-readable reasons an AI draft passed or failed the minimum gate
+- `scenes/` — one Markdown file per imported scene/chapter
+- `reports/import-report.md` — import diagnostics
+- `reports/review.md` — deterministic review findings
+- `prompts/consequence-*.md` — AI-ready context packets and instructions
+- `prompts/summary.md` — AI-ready editorial summary packet
+- `reports/ai-summary.md` — AI-generated editorial summary when `--call-ai` is configured
+- `prompts/deep-summary.md` — bounded scene-evidence packet for deeper AI analysis
+- `reports/deep-ai-summary.md` — deep AI summary when `--call-ai` is configured
+- `reports/scenario-*.md` — revision impact analysis before any rewrite
+- `prompts/scenario-*.md` — AI-ready revision scenario packets
+- `reports/revision-*.md` — revision diagnosis or validated-minimum AI proposal, with source provenance
+- `prompts/revision-*.md` — line-numbered evidence and editorial instructions
+- `reports/revision-*-model-review.json` — machine-readable reasons an AI draft passed or failed the minimum gate
 
 ## Optional AI endpoint
 
-The prototype can call any OpenAI-compatible chat endpoint. Configure these environment variables in PowerShell before running `consequence`:
+The prototype can call any OpenAI-compatible chat endpoint. Configure these environment variables before running `consequence`:
 
 ```powershell
+# PowerShell
 $env:THREADKEEPER_API_KEY = "..."
 $env:THREADKEEPER_BASE_URL = "https://api.openai.com/v1"
 $env:THREADKEEPER_MODEL = "your-model"
-node src/threadkeeper.mjs consequence work\moonstone --scene 2 --call-ai
+```
+
+```sh
+# bash / zsh
+export THREADKEEPER_API_KEY="..."
+export THREADKEEPER_BASE_URL="https://api.openai.com/v1"
+export THREADKEEPER_MODEL="your-model"
+```
+
+```sh
+node src/threadkeeper.mjs consequence work/moonstone --scene 2 --call-ai
 ```
 
 Without those variables, the command still writes the complete prompt packet for manual review or later integration.
 
-For a local model, run Ollama and use `--local-model <installed-model>` with `assess-revision`. This uses Ollama's local chat endpoint and a bounded evidence packet. Small models may still fail the grounding gate or produce poor editorial judgment; rejected drafts are saved under `prompts\` for inspection without overwriting the diagnostic report. The gate checks format and supplied-source references, not whether the literary reasoning is true.
+For a local model, run Ollama and use `--local-model <installed-model>` with `assess-revision`. This uses Ollama's local chat endpoint and a bounded evidence packet. Small models may still fail the grounding gate or produce poor editorial judgment; rejected drafts are saved under `prompts/` for inspection without overwriting the diagnostic report. The gate checks format and supplied-source references, not whether the literary reasoning is true.
 
 With Codex CLI available, `--codex` sends the full selected evidence packet through an ephemeral, read-only Codex run and records the reported model plus the returned draft. The manuscript and generated project files stay in the local `work/` directory, but the selected passages are sent to the model provider. The read-only setting prevents the editorial run from changing the repository; it does not make the model's interpretation authoritative.
 
 You can also check a draft written by another model or editor without wiring that model into Threadkeeper:
 
-```powershell
+```sh
 node src/threadkeeper.mjs assess-revision work/ackroyd-first-run --change "Make Dr. Sheppard innocent while preserving the final reveal." --draft path/to/editorial-draft.md
 ```
 
@@ -86,31 +105,34 @@ This imports the file as a proposal and checks it against the full selected evid
 
 After ingesting and reviewing a project, generate a summary packet from the deterministic results:
 
-```powershell
-node src/threadkeeper.mjs summarize work\moonstone
+```sh
+node src/threadkeeper.mjs summarize work/moonstone
 ```
 
 To include a revision scenario in the summary:
 
-```powershell
-node src/threadkeeper.mjs summarize work\moonstone --scenario work\moonstone\reports\scenario-example.md
+```sh
+node src/threadkeeper.mjs scenario work/moonstone --change "Make Franklin Blake innocent."
+node src/threadkeeper.mjs summarize work/moonstone --scenario work/moonstone/reports/scenario-<name>.md
 ```
 
-With the optional endpoint variables configured, add `--call-ai` to write `reports\ai-summary.md`. The summary is advisory and evidence-linked; it cannot update canon or rewrite source prose automatically.
+`scenario` prints the path of the report it wrote (`reports/scenario-<name>.md`); pass that exact path as `<name>`. The file must exist or the command exits with an error.
+
+With the optional endpoint variables configured, add `--call-ai` to write `reports/ai-summary.md`. The summary is advisory and evidence-linked; it cannot update canon or rewrite source prose automatically.
 
 ## Deep AI editorial summary
 
 Use `deep-summarize` when the AI needs selected scene prose in addition to the deterministic results. Keep the evidence bounded around a target scene:
 
-```powershell
-node src/threadkeeper.mjs deep-summarize work\moonstone --scene 2 --window 2
+```sh
+node src/threadkeeper.mjs deep-summarize work/moonstone --scene 2 --window 2
 ```
 
 You can select explicit scenes or the entire project when the context budget supports it:
 
-```powershell
-node src/threadkeeper.mjs deep-summarize work\moonstone --scenes "1-3,12,20-22" --scenario work\moonstone\reports\scenario-example.md
-node src/threadkeeper.mjs deep-summarize work\moonstone --all-scenes --max-scene-chars 12000 --call-ai
+```sh
+node src/threadkeeper.mjs deep-summarize work/moonstone --scenes "1-3,6-7" --scenario work/moonstone/reports/scenario-<name>.md
+node src/threadkeeper.mjs deep-summarize work/moonstone --all-scenes --max-scene-chars 12000 --call-ai
 ```
 
 The command includes the deterministic review, selected scene packets, optional revision scenario, and any completed consequence reports. It states the evidence boundary in the prompt so the model must identify what it cannot conclude from a sampled set.
@@ -122,3 +144,7 @@ This is a vertical-slice foundation, not a claim that the continuity engine is s
 ## Revision scenarios
 
 The `scenario` command is an older entity-match impact scaffold. For evidence-backed revision work, use `assess-revision`. It always inspects opening and ending chapters for identity/motive changes, selects other scene excerpts by names, terms, and explicit testimony corrections, checks the source fingerprint, and discloses what it did not read. The constrained detector can flag a first-person murder admission, but cannot by itself prove speaker identity or derive a replacement plot. Neither command modifies source prose or accepted canon.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE). The bundled novel in `corpus/pg69087.txt` is a Project Gutenberg text distributed under its own license notice, not under this project's license. It is public domain in the US but may still be under copyright elsewhere; check local law before redistributing.

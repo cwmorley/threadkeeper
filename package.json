@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "Apache-2.0",
   "description": "A local-first narrative state and continuity review prototype for long-form fiction.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test",
     "ingest": "node src/threadkeeper.mjs ingest",
